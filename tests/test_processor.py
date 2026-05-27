@@ -56,6 +56,9 @@ class ProcessorTests(unittest.TestCase):
         inspected = inspect_upload("sample.docx", source.read_bytes())
         self.assertIn("job_id", inspected)
         self.assertEqual(inspected["document"]["inline_images"], 2)
+        self.assertEqual(inspected["document"]["floating_drawing_count"], 0)
+        self.assertEqual(inspected["document"]["unsupported_object_count"], 0)
+        self.assertIn("compatibility_notes", inspected["document"])
         self.assertEqual(inspected["settings"]["default_width_ratio"], 0.8)
 
         report = process_existing_job(inspected["job_id"], max_width_ratio=0.6, alignment="right")
