@@ -27,12 +27,8 @@ from app.pdf_processor import (
     process_existing_pdf_job,
     process_pdf_upload,
 )
-from app.feishu_client import FeishuError, credentials_available, export_feishu_docx, parse_feishu_doc_url
-
-
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PDF_MIME = "application/pdf"
-FEISHU_ENABLED = False
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -45,17 +41,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/health":
             self._send_json({"status": "ok"})
-            return
-        if path == "/api/feishu/status" and FEISHU_ENABLED:
-            configured = credentials_available()
-            self._send_json(
-                {
-                    "configured": configured,
-                    "available": configured,
-                    "message": "飞书导入已启用。" if configured else "当前未启用飞书导入。请先在飞书中下载为 Word，然后上传 .docx 文件。",
-                    "setup_hint": "管理员可配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET 启用飞书导入。",
-                }
-            )
             return
         if path.startswith("/api/docx/result/"):
             self._send_job_file(path.removeprefix("/api/docx/result/"), "output", DOCX_MIME)
@@ -80,8 +65,6 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         enabled_paths = {"/api/docx/inspect", "/api/docx/format", "/api/pdf/inspect", "/api/pdf/format"}
-        if FEISHU_ENABLED:
-            enabled_paths.add("/api/feishu/import")
         if path not in enabled_paths:
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
@@ -142,35 +125,6 @@ class AppHandler(BaseHTTPRequestHandler):
                     report = process_pdf_upload(upload["filename"], upload["data"])
             except (PdfProcessingError, FileNotFoundError) as exc:
                 self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-                return
-            self._send_json(report)
-            return
-
-        if path == "/api/feishu/import":
-            link = parts.get("url", {}).get("value", "").strip()
-            if not link:
-                self._send_json({"error": "Missing Feishu document URL."}, HTTPStatus.BAD_REQUEST)
-                return
-            try:
-                parse_feishu_doc_url(link)
-                filename, data = export_feishu_docx(link)
-                report = inspect_upload(filename, data)
-                report["source"] = {
-                    "type": "feishu",
-                    "url": link,
-                    "note": "Feishu document was exported as .docx and is ready for the Word/WPS image workflow.",
-                }
-            except FeishuError as exc:
-                configured = credentials_available()
-                self._send_json(
-                    {
-                        "error": "飞书导入当前不可用。" if not configured else str(exc),
-                        "configured": configured,
-                        "message": "请先在飞书中下载为 Word，然后上传 .docx 文件。" if not configured else str(exc),
-                        "setup_hint": "管理员可配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET 启用飞书导入。",
-                    },
-                    HTTPStatus.BAD_REQUEST,
-                )
                 return
             self._send_json(report)
             return
@@ -1201,16 +1155,6 @@ INDEX_HTML = r"""<!doctype html>
             <span class="filename" id="fileName">尚未选择文件</span>
             <span id="fileSize">-</span>
           </div>
-          <div class="setting-row" style="margin-top: 14px;" hidden>
-            <div>
-              <div class="field-title">飞书在线文档</div>
-              <div class="field-hint" id="feishuHint">正在检测飞书导入状态...</div>
-            </div>
-          </div>
-          <div class="actions" hidden>
-            <input id="feishuUrl" type="url" placeholder="https://xxx.feishu.cn/docx/..." style="flex:1; min-width:220px; min-height:40px; border:1px solid var(--line); border-radius:6px; padding:0 10px;" />
-            <button id="feishuBtn" class="secondary" type="button">导入飞书文档</button>
-          </div>
         </section>
 
         <section class="settings" id="settings" hidden>
@@ -1306,8 +1250,6 @@ INDEX_HTML = r"""<!doctype html>
     const fileSize = document.getElementById("fileSize");
     const inspectBtn = document.getElementById("inspectBtn");
     const submitBtn = document.getElementById("submitBtn");
-    const feishuUrl = document.getElementById("feishuUrl");
-    const feishuBtn = document.getElementById("feishuBtn");
     const statusEl = document.getElementById("status");
     const reportEl = document.getElementById("report");
     const reportDetails = document.getElementById("reportDetails");
@@ -1322,8 +1264,6 @@ INDEX_HTML = r"""<!doctype html>
     let selectedAlignment = "center";
     let inspectedJobId = null;
     let selectedFileType = "docx";
-
-    // Feishu import is intentionally hidden until user-level OAuth is designed.
 
     fileInput.addEventListener("change", () => {
       setSelectedFile(fileInput.files[0], false);
@@ -1362,52 +1302,6 @@ INDEX_HTML = r"""<!doctype html>
       const file = fileInput.files[0];
       if (file) await inspectSelectedFile(file);
     });
-
-    feishuBtn.addEventListener("click", async () => {
-      const link = feishuUrl.value.trim();
-      if (!link) {
-        setStatus("请先输入飞书文档链接。", "error");
-        return;
-      }
-      feishuBtn.disabled = true;
-      selectedFileType = "docx";
-      setStatus("正在从飞书导出文档，请稍等...", "");
-      const form = new FormData();
-      form.append("url", link);
-      try {
-        const response = await fetch("/api/feishu/import", { method: "POST", body: form });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "飞书文档导入失败");
-        inspectedJobId = payload.job_id;
-        fileName.textContent = payload.original_filename || "飞书导出的文档.docx";
-        fileSize.textContent = formatFileSize(payload.document?.file_size || 0);
-        inspectBtn.disabled = true;
-        renderInspect(payload);
-        setStatus("飞书文档已导入。确认右侧预览后，点击“整理图片”。", "ready");
-      } catch (error) {
-        setStatus(error.message, "error");
-      } finally {
-        feishuBtn.disabled = false;
-      }
-    });
-
-    async function checkFeishuStatus() {
-      const hint = document.getElementById("feishuHint");
-      try {
-        const response = await fetch("/api/feishu/status");
-        const payload = await response.json();
-        hint.textContent = payload.message || "飞书导入状态未知。";
-        feishuBtn.disabled = !payload.available;
-        feishuUrl.disabled = !payload.available;
-        if (!payload.available) {
-          feishuUrl.placeholder = "当前未启用：请先从飞书下载 Word 后上传";
-        }
-      } catch {
-        hint.textContent = "无法检测飞书导入状态。请先从飞书下载 Word 后上传。";
-        feishuBtn.disabled = true;
-        feishuUrl.disabled = true;
-      }
-    }
 
     submitBtn.addEventListener("click", async () => {
       if (!inspectedJobId) return;
